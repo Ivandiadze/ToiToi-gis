@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Toilet Map — MVP (Leaflet + OpenStreetMap)</title>
+  <meta name="description" content="A tiny single-file web app with an interactive map. Add spots with descriptions and photos. 100% free: Leaflet + OpenStreetMap (no API key)." />
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root { --bg:#0b0f14; --panel:#121821; --muted:#96a0ad; --text:#e9eef5; --accent:#2ec27e; }
+    html, body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial; }
+    #app { height:100%; display:grid; grid-template-rows:auto 1fr; }
+    header { display:flex; align-items:center; gap:.5rem; padding:.6rem .8rem; background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,0)); border-bottom:1px solid rgba(255,255,255,.06); position:sticky; top:0; z-index:1000; backdrop-filter: blur(6px); }
+    header h1 { font-size:1rem; margin:0; font-weight:600; }
+    header .pill { font-size:.72rem; color:var(--muted); }
+    #map { height:100%; }
+    .controls { position:absolute; right:.6rem; bottom:.6rem; display:grid; gap:.5rem; z-index:500; }
+    .btn { appearance:none; border:1px solid rgba(255,255,255,.1); background:var(--panel); color:var(--text); padding:.6rem .7rem; border-radius:14px; font-size:.9rem; box-shadow:0 6px 20px rgba(0,0,0,.25); display:inline-flex; align-items:center; gap:.45rem; }
+    .btn:hover { border-color:rgba(255,255,255,.2); }
+    .btn.primary { background:linear-gradient(180deg,var(--accent),#1ea66a); color:#042915; border-color:transparent; }
+    .btn.warning { background:linear-gradient(180deg,#ffb4b4,#ff8686); color:#2d0a0a; border-color:transparent; }
+    .btn:disabled { opacity:.6; }
+    .panel { position:absolute; left:.6rem; right:.6rem; bottom:.6rem; max-width:720px; margin:0 auto; background:var(--panel); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:.9rem; box-shadow:0 20px 40px rgba(0,0,0,.4); z-index:900; }
+    .panel h2 { margin:0 0 .6rem; font-size:1.05rem; }
+    .row { display:grid; gap:.6rem; grid-template-columns:1fr 1fr; }
+    .row > * { min-width:0; }
+    label { display:block; font-size:.8rem; color:var(--muted); margin-bottom:.25rem; }
+    input[type="text"], textarea, select { width:100%; padding:.6rem .7rem; background:#0d131b; border:1px solid rgba(255,255,255,.08); border-radius:12px; color:var(--text); font-size:.95rem; }
+    textarea { min-height:80px; resize:vertical; }
+    .actions { display:flex; gap:.6rem; justify-content:space-between; margin-top:.8rem; flex-wrap:wrap; }
+    .muted { color:var(--muted); font-size:.85rem; }
+    .hidden { display:none; }
+    .photo-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:.5rem; }
+    .photo-grid img { width:100%; border-radius:10px; object-fit:cover; aspect-ratio:1/1; border:1px solid rgba(255,255,255,.08); }
+    .searchbar { position:absolute; left:.6rem; top:3.5rem; right:.6rem; z-index:800; max-width:740px; margin:0 auto; display:flex; gap:.5rem; }
+    .searchbar input { flex:1; }
+    @media (min-width:740px){ .panel{ left:50%; right:auto; transform:translateX(-50%); width:720px; } }
+    .leaflet-popup-content { color:#1a1f27; }
+  </style>
+
+  <!-- PWA: manifest + theme color + iOS meta -->
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#0b0f14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="apple-touch-icon" href="./icons/icon-180.png">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Toilet Map (MVP)</h1>
+      <span class="pill">100% free · Leaflet + OpenStreetMap · data stays on this device</span>
+    </header>
+
+    <div id="map" role="application" aria-label="Interactive map"></div>
+
+    <!-- Search -->
+    <div class="searchbar">
+      <input id="searchInput" type="text" placeholder="Search by title or description… (⌘/Ctrl + K)" />
+      <button class="btn" id="clearSearchBtn" title="Clear search">Reset</button>
+    </div>
+
+    <!-- Floating controls -->
+    <div class="controls">
+      <button class="btn" id="locateBtn" title="Show my location">📍 My location</button>
+      <button class="btn primary" id="addPointBtn" title="Add a new spot">➕ Add spot</button>
+      <button class="btn" id="exportBtn" title="Export spots to JSON">⬇️ Export</button>
+      <label class="btn" title="Import spots from JSON">
+        ⬆️ Import
+        <input id="importFile" type="file" accept="application/json" class="hidden" />
+      </label>
+      <button class="btn warning" id="wipeBtn" title="Delete all local data">🗑 Wipe</button>
+    </div>
+
+    <!-- Add/Edit panel -->
+    <section id="editorPanel" class="panel hidden" aria-live="polite">
+      <h2 id="panelTitle">New spot</h2>
+      <div class="row">
+        <div>
+          <label for="title">Title</label>
+          <input id="title" type="text" placeholder="e.g., Restroom in Business Center A" />
+        </div>
+        <div>
+          <label for="status">Access</label>
+          <select id="status">
+            <option value="public">Open to everyone</option>
+            <option value="semi">Semi-open (badge/trick)</option>
+            <option value="private">Employees only</option>
+            <option value="unknown" selected>Not sure</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="hasToilet">Has restroom?</label>
+          <select id="hasToilet">
+            <option value="yes">Yes</option>
+            <option value="no">No (entry/building only)</option>
+            <option value="maybe" selected>Not sure</option>
+          </select>
+        </div>
+        <div>
+          <label for="rating">Cleanliness (0–5)</label>
+          <input id="rating" type="text" inputmode="decimal" placeholder="e.g., 4.5" />
+        </div>
+      </div>
+      <div>
+        <label for="desc">Description / how to get there</label>
+        <textarea id="desc" placeholder="Where to enter, floor, door code, hours, etc."></textarea>
+      </div>
+      <div>
+        <label for="photoInput">Photos (up to 4 — saved locally)</label>
+        <input id="photoInput" type="file" accept="image/*" multiple />
+        <div id="photoPreview" class="photo-grid" aria-live="polite"></div>
+      </div>
+      <div class="actions">
+        <div class="muted">Coords: <span id="coordsLabel">not picked</span></div>
+        <div>
+          <button class="btn" id="pickOnMapBtn">Pick on map</button>
+          <button class="btn" id="cancelBtn">Cancel</button>
+          <button class="btn primary" id="saveBtn">Save</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+  // ======= Storage helpers =======
+  const STORAGE_KEY = 'toiletMapPoints/leaflet-v1';
+  const VIEW_KEY = 'toiletMapView/leaflet';
+  const loadPoints = () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } };
+  const savePoints = (pts) => localStorage.setItem(STORAGE_KEY, JSON.stringify(pts));
+
+  // ======= Map init =======
+  const map = L.map('map');
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 20,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+
+  // Restore or default view (Ljubljana)
+  const restoreView = () => {
+    try {
+      const v = JSON.parse(localStorage.getItem(VIEW_KEY));
+      if (v && v.center && v.zoom) { map.setView(v.center, v.zoom); return; }
+    } catch {}
+    map.setView([46.0569, 14.5058], 13);
+  };
+  const storeView = () => localStorage.setItem(VIEW_KEY, JSON.stringify({ center: map.getCenter(), zoom: map.getZoom() }));
+  map.on('moveend', storeView); restoreView();
+
+  // ======= UI refs =======
+  const addPointBtn = document.getElementById('addPointBtn');
+  const locateBtn = document.getElementById('locateBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const importFile = document.getElementById('importFile');
+  const wipeBtn = document.getElementById('wipeBtn');
+  const editorPanel = document.getElementById('editorPanel');
+  const panelTitle = document.getElementById('panelTitle');
+  const titleInput = document.getElementById('title');
+  const statusInput = document.getElementById('status');
+  const hasToiletInput = document.getElementById('hasToilet');
+  const ratingInput = document.getElementById('rating');
+  const descInput = document.getElementById('desc');
+  const photoInput = document.getElementById('photoInput');
+  const photoPreview = document.getElementById('photoPreview');
+  const saveBtn = document.getElementById('saveBtn');
+  const cancelBtn = document.getElementById('cancelBtn');
+  const pickOnMapBtn = document.getElementById('pickOnMapBtn');
+  const coordsLabel = document.getElementById('coordsLabel');
+  const searchInput = document.getElementById('searchInput');
+  const clearSearchBtn = document.getElementById('clearSearchBtn');
+
+  let points = loadPoints();
+  let markers = [];
+  let draft = null; // {id, lat, lng, photos: []}
+  let picking = false, pickMarker = null;
+
+  function resetDraft(){
+    draft = { id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())), lat: null, lng: null, photos: [] };
+    titleInput.value = ''; statusInput.value = 'unknown'; hasToiletInput.value = 'maybe'; ratingInput.value = '';
+    descInput.value = ''; photoInput.value = ''; photoPreview.innerHTML = ''; coordsLabel.textContent = 'not picked';
+  }
+  function openEditor(editPoint=null){
+    editorPanel.classList.remove('hidden');
+    if (editPoint){
+      panelTitle.textContent = 'Edit spot';
+      draft = JSON.parse(JSON.stringify(editPoint));
+      titleInput.value = editPoint.title || '';
+      statusInput.value = editPoint.status || 'unknown';
+      hasToiletInput.value = editPoint.hasToilet || 'maybe';
+      ratingInput.value = editPoint.rating || '';
+      descInput.value = editPoint.desc || '';
+      coordsLabel.textContent = `${editPoint.lat.toFixed(6)}, ${editPoint.lng.toFixed(6)}`;
+      renderPhotoPreview();
+    } else { panelTitle.textContent = 'New spot'; resetDraft(); }
+  }
+  function closeEditor(){ editorPanel.classList.add('hidden'); }
+
+  function renderPhotoPreview(){
+    photoPreview.innerHTML='';
+    draft.photos.forEach((src, idx)=>{
+      const img = document.createElement('img'); img.src = src; img.alt = `Photo ${idx+1}`; img.title = 'Click to remove';
+      img.addEventListener('click', ()=>{ draft.photos.splice(idx,1); renderPhotoPreview(); });
+      photoPreview.appendChild(img);
+    });
+  }
+
+  // Photo handling
+  photoInput.addEventListener('change', async (e)=>{
+    const files = Array.from(e.target.files || []).slice(0, 4 - draft.photos.length);
+    for (const f of files){ if (!f.type.startsWith('image/')) continue; const dataUrl = await fileToDataURL(f); draft.photos.push(dataUrl); }
+    renderPhotoPreview();
+  });
+  function fileToDataURL(file){ return new Promise((res, rej)=>{ const r = new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(file); }); }
+
+  // Pick coordinates
+  pickOnMapBtn.addEventListener('click', ()=>{
+    picking = true; pickOnMapBtn.disabled = true;
+    if (pickMarker) { map.removeLayer(pickMarker); pickMarker = null; }
+    L.popup().setLatLng(map.getCenter()).setContent('Tap the map to choose the spot').openOn(map);
+  });
+  map.on('click', (e)=>{
+    if (!picking) return;
+    draft.lat = e.latlng.lat; draft.lng = e.latlng.lng;
+    coordsLabel.textContent = `${draft.lat.toFixed(6)}, ${draft.lng.toFixed(6)}`;
+    if (pickMarker) map.removeLayer(pickMarker);
+    pickMarker = L.marker([draft.lat, draft.lng]).addTo(map);
+    picking = false; pickOnMapBtn.disabled = false; map.closePopup();
+  });
+
+  function escapeHTML(s){ return (s||'').replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c])); }
+
+  function markerHTML(p){
+    const statusMap = { public: 'Open to everyone', semi: 'Semi-open', private: 'Employees only', unknown: 'Unknown' };
+    const toiletMap = { yes: 'Has restroom', no: 'No restroom', maybe: 'Not sure' };
+    const photos = (p.photos||[]).slice(0,4).map(src=>`<img src="${src}" alt="Photo" style="width:100%;border-radius:8px;border:1px solid #e0e0e0;object-fit:cover;aspect-ratio:1/1;" />`).join('');
+    const photoGrid = photos ? `<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:6px;">${photos}</div>` : '';
+    const rating = p.rating ? ` · ⭐ ${p.rating}` : '';
+    return `
+      <div style="min-width:220px;max-width:280px;">
+        <div style="font-weight:600;margin-bottom:4px;">${escapeHTML(p.title||'Untitled')}${rating}</div>
+        <div style="font-size:12px;color:#4a5568;margin-bottom:6px;">${statusMap[p.status||'unknown']} · ${toiletMap[p.hasToilet||'maybe']}</div>
+        <div style="white-space:pre-wrap;font-size:13px;">${escapeHTML(p.desc||'')}</div>
+        ${photoGrid}
+        <div style="display:flex;gap:6px;margin-top:8px;">
+          <button data-action="edit" data-id="${p.id}" style="flex:1;padding:.4rem .5rem;border-radius:10px;border:1px solid #d1d5db;background:#f3f4f6;">Edit</button>
+          <button data-action="delete" data-id="${p.id}" style="flex:1;padding:.4rem .5rem;border-radius:10px;border:1px solid #fecaca;background:#fee2e2;">Delete</button>
+        </div>
+      </div>`;
+  }
+
+  function renderMarkers(filterText=''){
+    markers.forEach(m=>m.remove()); markers = [];
+    const q = (filterText||'').trim().toLowerCase();
+    points.forEach(p=>{
+      if (q){ const hay = `${p.title||''} ${p.desc||''}`.toLowerCase(); if (!hay.includes(q)) return; }
+      const m = L.marker([p.lat, p.lng]).addTo(map);
+      m.bindPopup(markerHTML(p));
+      m.on('popupopen', (e)=>{
+        const el = e.popup.getElement();
+        el.querySelectorAll('button[data-action]')?.forEach(btn=>{
+          btn.addEventListener('click', ()=>{
+            const id = btn.dataset.id; const action = btn.dataset.action;
+            if (action==='edit'){ const found = points.find(x=>x.id===id); if (found) openEditor(found); }
+            if (action==='delete'){ if (confirm('Delete this spot?')){ points = points.filter(x=>x.id!==id); savePoints(points); renderMarkers(searchInput.value); map.closePopup(); } }
+          });
+        });
+      });
+      markers.push(m);
+    });
+  }
+
+  // Save spot
+  saveBtn.addEventListener('click', ()=>{
+    if (draft.lat==null || draft.lng==null){ alert('Please pick a location on the map'); return; }
+    const cleanRating = ratingInput.value.trim();
+    const newPoint = {
+      id: draft.id, lat: draft.lat, lng: draft.lng,
+      title: titleInput.value.trim(), status: statusInput.value, hasToilet: hasToiletInput.value,
+      rating: cleanRating || undefined, desc: descInput.value.trim(), photos: draft.photos, createdAt: Date.now(),
+    };
+    const existsIdx = points.findIndex(p=>p.id===draft.id);
+    if (existsIdx>=0) points[existsIdx] = newPoint; else points.push(newPoint);
+    savePoints(points); renderMarkers(searchInput.value); closeEditor();
+  });
+
+  // Buttons
+  cancelBtn.addEventListener('click', ()=> closeEditor());
+  addPointBtn.addEventListener('click', ()=> openEditor());
+
+  locateBtn.addEventListener('click', ()=>{
+    if (!navigator.geolocation){ alert('Geolocation not available in this browser'); return; }
+    locateBtn.disabled = true;
+    navigator.geolocation.getCurrentPosition((pos)=>{
+      const { latitude, longitude, accuracy } = pos.coords;
+      map.setView([latitude, longitude], Math.max(map.getZoom(), 16));
+      L.circle([latitude, longitude], { radius: accuracy }).addTo(map);
+      locateBtn.disabled = false;
+    }, ()=>{ alert('Failed to get your location'); locateBtn.disabled = false; }, { enableHighAccuracy:true, timeout:10000, maximumAge:10000 });
+  });
+
+  exportBtn.addEventListener('click', ()=>{
+    const blob = new Blob([JSON.stringify(points, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'toilet-map-points.json'; a.click(); URL.revokeObjectURL(url);
+  });
+
+  importFile.addEventListener('change', async (e)=>{
+    const file = e.target.files?.[0]; if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text); if (!Array.isArray(data)) throw new Error('Expected an array of spots');
+      const byId = Object.fromEntries(points.map(p=>[p.id,p])); data.forEach(p=>{ byId[p.id] = p; });
+      points = Object.values(byId); savePoints(points); renderMarkers(searchInput.value); alert('Import complete');
+    } catch(err){ alert('Import error: ' + err.message); } finally { e.target.value=''; }
+  });
+
+  wipeBtn.addEventListener('click', ()=>{ if (confirm('Delete all local spots?')){ points = []; savePoints(points); renderMarkers(searchInput.value); } });
+
+  // Search
+  searchInput.addEventListener('input', ()=> renderMarkers(searchInput.value));
+  clearSearchBtn.addEventListener('click', ()=>{ searchInput.value=''; renderMarkers(''); searchInput.focus(); });
+  window.addEventListener('keydown', (e)=>{ if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); searchInput.focus(); searchInput.select(); } });
+
+  // First render
+  renderMarkers('');
+  </script>
+
+  <!-- PWA: service worker registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function(){
+        navigator.serviceWorker.register('./service-worker.js').catch(function(err){
+          console.warn('SW registration failed:', err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
